@@ -3,44 +3,48 @@
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
-Preprocess::Preprocess()
+Preprocess::Preprocess()//构造函数，在创建类对象时赋值的默认值
   :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+  //默认：不进行特征提取，雷达类型选择AVIA，盲区距离为0.01 采样间隔为1
 {
-  inf_bound = 10;
-  N_SCANS   = 6;
-  SCAN_RATE = 10;
-  group_size = 8;
-  disA = 0.01;
-  disA = 0.1; // B?
-  p2l_ratio = 225;
-  limit_maxmid =6.25;
-  limit_midmin =6.25;
-  limit_maxmin = 3.24;
+  inf_bound = 10;//有效点集合，大于10m则是盲区
+  N_SCANS   = 6;//多线激光雷达的线数
+  SCAN_RATE = 10;//扫描频率10HZ
+  group_size = 8;///8个点为一组
+  disA = 0.01;//点集合的距离阈值，用于判断是否为平面
+  disA = 0.1; // 点集合的距离阈值，用于判断是否为平面，应该是B？？？？？
+  p2l_ratio = 225;//点到线的距离阈值，需要大于这个值才能判断组成面
+  limit_maxmid =6.25;//中点到左侧的距离变化率范围
+  limit_midmin =6.25;//中点到右侧的距离变化率范围
+  limit_maxmin = 3.24;//左侧到右侧的距离变化率范围
   jump_up_limit = 170.0;
   jump_down_limit = 8.0;
   cos160 = 160.0;
-  edgea = 2;
-  edgeb = 0.1;
+  edgea = 2;//点与点距离超过两倍则认为遮挡
+  edgeb = 0.1;//点与点距离超过0.1m则认为遮挡
   smallp_intersect = 172.5;
-  smallp_ratio = 1.2;
-  given_offset_time = false;
+  smallp_ratio = 1.2;//三个点如果角度大于172.5度，且比例小于1.2倍，则认为是平面
+  given_offset_time = false;//是否提供时间偏移。默认不提供
 
-  jump_up_limit = cos(jump_up_limit/180*M_PI);
-  jump_down_limit = cos(jump_down_limit/180*M_PI);
-  cos160 = cos(cos160/180*M_PI);
-  smallp_intersect = cos(smallp_intersect/180*M_PI);
+  jump_up_limit = cos(jump_up_limit/180*M_PI);//角度大于170度的点则跳过，认为在...
+  jump_down_limit = cos(jump_down_limit/180*M_PI);//角度小于8度的点跳过
+  cos160 = cos(cos160/180*M_PI);//夹角限制
+  smallp_intersect = cos(smallp_intersect/180*M_PI);//三个点如果角度大于172.5度，且比例小于1.2倍，则认为是平面
 }
 
-Preprocess::~Preprocess() {}
-
+Preprocess::~Preprocess() {}//析构函数
+//设置参数用的函数，在程序中并未使用，主要时设置程序运行参数，如是否提取特征点、雷达种类、盲区范围，采样间隔。
 void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
 {
   feature_enabled = feat_en;
   lidar_type = lid_type;
   blind = bld;
-  point_filter_num = pfilt_num;
+  point_filter_num = pfilt_num;//设置采样间隔：即每隔point_filter_num个点取1个点
 }
-
+//预处理函数，主要包含了不同激光雷达的处理，在laser-mapping.cpp中被调用，从而拿到处理后的点云。并初步完成了筛选。
+//输入：livox_ros_driver::CustomMsg
+//输出：pcl::PointXYZINormal：float x, y, z, intensity, normal_x,normal_y,normal_z, curvature;
+//其中的Normal结构体：表示给定点所在样本曲面上的法线方向，以及对应曲率的测量值，用第四个元素来占位，兼容SSE和高效计算。用户访问法向量的第一个坐标，可以通过points[i].data_n[0]或者points[i].normal[0]或者points[i].normal_x，但曲率不能被存储在同一个结构体中，因为它会被普通的数据操作覆盖掉
 void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {  
   avia_handler(msg);
@@ -52,19 +56,19 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   switch (time_unit)
   {
     case SEC:
-      time_unit_scale = 1.e3f;
+      time_unit_scale = 1.e3f;//1000
       break;
     case MS:
-      time_unit_scale = 1.f;
+      time_unit_scale = 1.f;//1
       break;
     case US:
-      time_unit_scale = 1.e-3f;
+      time_unit_scale = 1.e-3f;//0.001
       break;
     case NS:
-      time_unit_scale = 1.e-6f;
+      time_unit_scale = 1.e-6f;//0.000001
       break;
     default:
-      time_unit_scale = 1.f;
+      time_unit_scale = 1.f;//否则按照MS执行
       break;
   }
 
@@ -84,40 +88,53 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   }
   *pcl_out = pl_surf;
 }
-
+//对livox雷达的预处理：拿到livox
 void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 {
-  pl_surf.clear();
-  pl_corn.clear();
-  pl_full.clear();
-  double t1 = omp_get_wtime();
-  int plsize = msg->point_num;
+  //清除之前的点云缓存
+  pl_surf.clear();//清除之前的平面点点云缓存
+  pl_corn.clear();//清除之前的角点点云缓存
+  pl_full.clear();//清除之前的全部点点云缓存
+  double t1 = omp_get_wtime();//后面没用到，这是在此处记录一个时间戳
+  int plsize = msg->point_num;//一帧中的点云总个数
   // cout<<"plsie: "<<plsize<<endl;
 
-  pl_corn.reserve(plsize);
-  pl_surf.reserve(plsize);
-  pl_full.resize(plsize);
+  pl_corn.reserve(plsize);//分配空间
+  pl_surf.reserve(plsize);//分配空间
+  pl_full.resize(plsize);//分配空间
 
   for(int i=0; i<N_SCANS; i++)
   {
     pl_buff[i].clear();
-    pl_buff[i].reserve(plsize);
+    pl_buff[i].reserve(plsize);//每一个SCAN（每条扫描线）保存的点云数量
   }
-  uint valid_num = 0;
-  
+  uint valid_num = 0;//有效的点云数
+  //如果进行特征提取（fast-lio2默认不进行特征提取）
   if (feature_enabled)
-  {
+  {//遍历一帧数据中的每个点（1-plsize而不是0到plsize）
     for(uint i=1; i<plsize; i++)
     {
+      //只取线数在0～N_SCANS内并且回波次序为0或者1的点云
+      //激光雷达的回波次序通常指的是激光束在发送后被目标反射并返回的次序。在回波次序中，通常有两个主要值：0 和 1。
+    /*回波次序为 0：
+        表示激光束发送后，目标的反射回波是第一个到达激光雷达的。
+        这通常意味着目标离激光雷达比较近，因此回波的时间很短。
+        在一些激光雷达系统中，回波次序为 0 可能与近距离目标的探测相关。
+      回波次序为 1：
+        表示激光束发送后，目标的反射回波是第二个或后面的到达激光雷达的。
+        这通常意味着目标离激光雷达比较远，导致回波的时间较长。
+        回波次序的信息对于激光雷达在环境中定位和建图非常重要。通过检测回波的次序，系统可以推断目标的距离，并进一步分析目标的位置、形状等信息。在某些应用中，这种信息对于识别静态和动态目标、避障、导航等方面都很有用。不同的激光雷达系统和应用可能采用不同的回波次序策略*/
       if((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00))
       {
-        pl_full[i].x = msg->points[i].x;
+        pl_full[i].x = msg->points[i].x;//点云x轴
         pl_full[i].y = msg->points[i].y;
         pl_full[i].z = msg->points[i].z;
         pl_full[i].intensity = msg->points[i].reflectivity;
+        //使用曲率作为每个激光点的时间
         pl_full[i].curvature = msg->points[i].offset_time / float(1000000); //use curvature as time of each laser points
 
         bool is_new = false;
+        //只有当前点和上一个点的间距足够大（>1e-7(好像也不是很大)），才将当前点认为是有用的点，分别加入到pl_buff对应line的buffer中
         if((abs(pl_full[i].x - pl_full[i-1].x) > 1e-7) 
             || (abs(pl_full[i].y - pl_full[i-1].y) > 1e-7)
             || (abs(pl_full[i].z - pl_full[i-1].z) > 1e-7))
@@ -130,8 +147,10 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     static double time = 0.0;
     count ++;
     double t0 = omp_get_wtime();
+    //对每个line中的点进行分别处理（pl_buff中的line）
     for(int j=0; j<N_SCANS; j++)
     {
+      //如果当前line中的点云过小（点的数量过小），则直接跳过，继续处理下一条line
       if(pl_buff[j].size() <= 5) continue;
       pcl::PointCloud<PointType> &pl = pl_buff[j];
       plsize = pl.size();
@@ -145,30 +164,45 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
         vx = pl[i].x - pl[i + 1].x;
         vy = pl[i].y - pl[i + 1].y;
         vz = pl[i].z - pl[i + 1].z;
-        types[i].dista = sqrt(vx * vx + vy * vy + vz * vz);
+        types[i].dista = sqrt(vx * vx + vy * vy + vz * vz);//计算前后两个间隔点的距离
       }
+      //因为i最后一个点没有i+1，所以单独求了一个range，没有distance
       types[plsize].range = sqrt(pl[plsize].x * pl[plsize].x + pl[plsize].y * pl[plsize].y);
-      give_feature(pl, types);
+      give_feature(pl, types);//给特征
       // pl_surf += pl;
     }
     time += omp_get_wtime() - t0;
     printf("Feature extraction time: %lf \n", time / count);
   }
+  //如果不进行特征提取
   else
   {
+    //遍历接收到的一帧数据中的每个点
     for(uint i=1; i<plsize; i++)
     {
+      //只取线数在0～N_SCANS内并且回波次序为0或者1的点云
+      //激光雷达的回波次序通常指的是激光束在发送后被目标反射并返回的次序。在回波次序中，通常有两个主要值：0 和 1。
+    /*回波次序为 0：
+        表示激光束发送后，目标的反射回波是第一个到达激光雷达的。
+        这通常意味着目标离激光雷达比较近，因此回波的时间很短。
+        在一些激光雷达系统中，回波次序为 0 可能与近距离目标的探测相关。
+      回波次序为 1：
+        表示激光束发送后，目标的反射回波是第二个或后面的到达激光雷达的。
+        这通常意味着目标离激光雷达比较远，导致回波的时间较长。
+        回波次序的信息对于激光雷达在环境中定位和建图非常重要。通过检测回波的次序，系统可以推断目标的距离，并进一步分析目标的位置、形状等信息。在某些应用中，这种信息对于识别静态和动态目标、避障、导航等方面都很有用。不同的激光雷达系统和应用可能采用不同的回波次序策略*/
       if((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00))
       {
-        valid_num ++;
+        valid_num ++;//有效点云数
+        //等间隔降采样
         if (valid_num % point_filter_num == 0)
         {
           pl_full[i].x = msg->points[i].x;
           pl_full[i].y = msg->points[i].y;
           pl_full[i].z = msg->points[i].z;
           pl_full[i].intensity = msg->points[i].reflectivity;
+          //使用曲率作为每个激光点的时间
           pl_full[i].curvature = msg->points[i].offset_time / float(1000000); // use curvature as time of each laser points, curvature unit: ms
-
+//只有当前点和上一个点的间距足够大（>1e-7(好像也不是很大)），才将当前点认为是有用的点，分别加入到pl_buff对应line的buffer中
           if(((abs(pl_full[i].x - pl_full[i-1].x) > 1e-7) 
               || (abs(pl_full[i].y - pl_full[i-1].y) > 1e-7)
               || (abs(pl_full[i].z - pl_full[i-1].z) > 1e-7))
@@ -188,11 +222,12 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   pl_corn.clear();
   pl_full.clear();
   pcl::PointCloud<ouster_ros::Point> pl_orig;
-  pcl::fromROSMsg(*msg, pl_orig);
-  int plsize = pl_orig.size();
+  pcl::fromROSMsg(*msg, pl_orig);//从ros中的sensor_msgs::PointCloud2数据格式转为pcl数据格式
+  int plsize = pl_orig.size();//plsize是一帧点云的数据大小
+  //reserve 是 C++ 中容器类（如 std::vector）提供的一个方法，用于预分配容器的内存空间，以减少动态分配内存的次数，从而提高程序的性能。
   pl_corn.reserve(plsize);
   pl_surf.reserve(plsize);
-  if (feature_enabled)
+  if (feature_enabled)//是否进行特征提取，如果需要进行特征提取：执行以下操作
   {
     for (int i = 0; i < N_SCANS; i++)
     {
@@ -200,59 +235,61 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       pl_buff[i].reserve(plsize);
     }
 
-    for (uint i = 0; i < plsize; i++)
+    for (uint i = 0; i < plsize; i++)//这里是遍历总点云数据中的每个点
     {
       double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y + pl_orig.points[i].z * pl_orig.points[i].z;
-      if (range < (blind * blind)) continue;
+      if (range < (blind * blind)) continue;//设置直通滤波
       Eigen::Vector3d pt_vec;
       PointType added_pt;
       added_pt.x = pl_orig.points[i].x;
       added_pt.y = pl_orig.points[i].y;
       added_pt.z = pl_orig.points[i].z;
       added_pt.intensity = pl_orig.points[i].intensity;
-      added_pt.normal_x = 0;
+      added_pt.normal_x = 0;//该点的法向量在x轴上的分量
       added_pt.normal_y = 0;
       added_pt.normal_z = 0;
-      double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.3;
+      double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.3;//self：这个值貌似没有用到
       if (yaw_angle >= 180.0)
         yaw_angle -= 360.0;
       if (yaw_angle <= -180.0)
         yaw_angle += 360.0;
 
-      added_pt.curvature = pl_orig.points[i].t * time_unit_scale;
-      if(pl_orig.points[i].ring < N_SCANS)
+      added_pt.curvature = pl_orig.points[i].t * time_unit_scale;//使用曲率当作时间戳：激光雷达点的时间戳*单位时间刻度（时间戳转化为ms）
+      if(pl_orig.points[i].ring < N_SCANS)//环号=激光雷达线号
       {
-        pl_buff[pl_orig.points[i].ring].push_back(added_pt);
+        pl_buff[pl_orig.points[i].ring].push_back(added_pt);//将这一帧激光雷达数据映射到对应的环号上
       }
     }
 
     for (int j = 0; j < N_SCANS; j++)
     {
-      PointCloudXYZI &pl = pl_buff[j];
+      PointCloudXYZI &pl = pl_buff[j];//提取出每一个激光线上的所有点
       int linesize = pl.size();
       vector<orgtype> &types = typess[j];
       types.clear();
       types.resize(linesize);
       linesize--;
+      //计算相邻点之间的速度信息（差分获得）
       for (uint i = 0; i < linesize; i++)
       {
-        types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+        types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);//得到每个点的距离信息
         vx = pl[i].x - pl[i + 1].x;
         vy = pl[i].y - pl[i + 1].y;
         vz = pl[i].z - pl[i + 1].z;
         types[i].dista = vx * vx + vy * vy + vz * vz;
       }
       types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
-      give_feature(pl, types);
+      give_feature(pl, types);//特征提取只在每条线上进行。
     }
   }
-  else
+  else//如果不进行特征提取操作
   {
     double time_stamp = msg->header.stamp.toSec();
     // cout << "===================================" << endl;
     // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
     for (int i = 0; i < pl_orig.points.size(); i++)
     {
+      //根据采样间隔进行降采样
       if (i % point_filter_num != 0) continue;
 
       double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y + pl_orig.points[i].z * pl_orig.points[i].z;
@@ -270,7 +307,7 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       added_pt.normal_z = 0;
       added_pt.curvature = pl_orig.points[i].t * time_unit_scale; // curvature unit: ms
 
-      pl_surf.points.push_back(added_pt);
+      pl_surf.points.push_back(added_pt);//为什么只添加到surf上？
     }
   }
   // pub_func(pl_surf, pub_full, msg->header.stamp);
@@ -450,10 +487,12 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       }
     }
 }
-
+//特征提取：只对每条line的点云提取特征
+//输入：1.每条扫描线上的点云（单条扫描线）
+//     2.这条扫描线上每个点的额外特征
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)
 {
-  int plsize = pl.size();
+  int plsize = pl.size();//单条扫描线上的点数
   int plsize2;
   if(plsize == 0)
   {
@@ -461,51 +500,64 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     return;
   }
   uint head = 0;
-
+//点不能在盲区，从这条线非盲区的点开始,这个距离只包含xy的计算
   while(types[head].range < blind)
   {
     head++;
   }
 
   // Surf
+  //group_size默认值为8，
+  //判断当前点后面是否还够8个点，如果够的话就逐渐减少，每次减8，就一次？
   plsize2 = (plsize > group_size) ? (plsize - group_size) : 0;
 
-  Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero());
-  Eigen::Vector3d last_direct(Eigen::Vector3d::Zero());
+  Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero());//当前平面法向量（初始化为0）CSDN说是法向量，我认为是方向向量
+  Eigen::Vector3d last_direct(Eigen::Vector3d::Zero());//上一个平面的法向量 CSDN说是法向量，我认为是方向向量
 
-  uint i_nex = 0, i2;
-  uint last_i = 0; uint last_i_nex = 0;
-  int last_state = 0;
+  uint i_nex = 0, i2;//i2为当前点的下一个点
+  uint last_i = 0; uint last_i_nex = 0;//last_i为上一个点的保存的索引
+  int last_state = 0;//为1代表上个状态为平面，否则为0
+  //判断面点
   int plane_type;
-
+//head是指当前传进来的一条线上第一个非盲区内的点
   for(uint i=head; i<plsize2; i++)
   {
+    //在盲区内的点不做处理
     if(types[i].range < blind)
     {
       continue;
     }
-
+//更新i2
     i2 = i;
-
+//求得平面，并返回类型0 1 2
+//返回为1时，才认为当前点时平面上的点
     plane_type = plane_judge(pl, types, i, i_nex, curr_direct);
     
     if(plane_type == 1)
-    {
+    {//设置确定的平面点和可能的平面点
       for(uint j=i; j<=i_nex; j++)
       { 
         if(j!=i && j!=i_nex)
         {
+          //把起始点和终止点之间的所有点设置为确定的平面点
           types[j].ftype = Real_Plane;
         }
         else
         {
+          //把起始点和终止点设为可能的平面点
           types[j].ftype = Poss_Plane;
         }
       }
       
       // if(last_state==1 && fabs(last_direct.sum())>0.5)
+      //最开始last_state=0,直接跳过，
+      //之后last_state =1
+      //如果之前状态是平面则判断当前点是处于两平面边缘的点还是较为平坦的平面的点
+      //last_direct.norm()求取的是上一次直线方向向量的范数，范数越大表示
+      //范数可以用来表示方向的稳定性： 平方范数越大，表示方向向量的每个分量的值越大，方向就越偏向各个维度的正向或负向。较大的平方范数可能表示直线方向更为突出或偏离坐标轴。
       if(last_state==1 && last_direct.norm()>0.1)
       {
+        //这里计算的是两个方向向量的夹角？？？但是CSDN说是两个法向量的夹角
         double mod = last_direct.transpose() * curr_direct;
         if(mod>-0.707 && mod<0.707)
         {
@@ -773,75 +825,98 @@ void Preprocess::pub_func(PointCloudXYZI &pl, const ros::Time &ct)
   output.header.frame_id = "livox";
   output.header.stamp = ct;
 }
-
+//平面判断
+//传入参数：
+//pl：当前点所在的一帧数据的的所在单条扫描线
+//types：这条扫描线上每个点的额外特征构成的数组
+//i_cur:当前点在pl中的索引位置
+//i_nex：猜测是下一个点
+//curr_direct:当前平面的法向量
+//输出一个值，若为1则表明目标点是平面点，并且把当前点所在平面的法向量赋值给传入参数curr_direct 并且i_nex的值也会改变为
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct)
 {
+  //0.01*sqrt(x^2+y^2)+0.1
+  //基本上可以近似看成是0.1，100m的时候才到0.2？？？？，其中disA和disB是定义的系数，暂时不知道干什么用的
+  //types[i_cur]得到的是sqrt(x^2+y^2)，在xy平面上的距离
   double group_dis = disA*types[i_cur].range + disB;
+//作平方运算
   group_dis = group_dis * group_dis;
   // i_nex = i_cur;
 
   double two_dis;
-  vector<double> disarr;
+  vector<double> disarr;//前后点距离数组
   disarr.reserve(20);
-
+/**********************先取最近的八个点，若不存在盲区内的点，存储当前点与后一个点的距离，再取这个扫描线中其他的距离当前点近的点，若比较近，且也不存在盲区内的点，也存储与后一个点的距离*******************************************************/
+//距离小  点与点之间较近，先取够八个点
   for(i_nex=i_cur; i_nex<i_cur+group_size; i_nex++)
   {
+    //但凡这八个点里面有一个盲区点就返回2
     if(types[i_nex].range < blind)
     {
-      curr_direct.setZero();
-      return 2;
+      curr_direct.setZero();//盲区点的法向量设置为零向量
+      return 2;//返回2 ？？？
     }
-    disarr.push_back(types[i_nex].dista);
+    disarr.push_back(types[i_nex].dista);//存储当前点与后一个点之间的距离
   }
-  
-  for(;;)
+  //看后续的点有没有满足条件的（满足什么条件:与当前点之间的距离小于 group_dis的点）
+  for(;;)//这句话等同于while(1)
   {
-    if((i_cur >= pl.size()) || (i_nex >= pl.size())) break;
-
+    if((i_cur >= pl.size()) || (i_nex >= pl.size())) break;//退出条件
+  //如果在pl中，除了选中的八个点之后的点中有一个盲区点，直接返回2
     if(types[i_nex].range < blind)
     {
-      curr_direct.setZero();
-      return 2;
+      curr_direct.setZero();//
+      return 2;//返回2
     }
+    //对于后续的点，距离i_cur太远了就直接break，不考虑了
     vx = pl[i_nex].x - pl[i_cur].x;
     vy = pl[i_nex].y - pl[i_cur].y;
     vz = pl[i_nex].z - pl[i_cur].z;
     two_dis = vx*vx + vy*vy + vz*vz;
     if(two_dis >= group_dis)
     {
-      break;
+      break;//跳出循环体
     }
-    disarr.push_back(types[i_nex].dista);
+    disarr.push_back(types[i_nex].dista);//存储当前点与后一个点的距离
     i_nex++;
   }
-
+/******************************************************************************************************/
   double leng_wid = 0;
   double v1[3], v2[3];
-  for(uint j=i_cur+1; j<i_nex; j++)
+  for(uint j=i_cur+1; j<i_nex; j++)//如果进行到这，此时i_nex取值到在所定义的距离公式计算的距离限度内，这一条扫描线上选中的前后点距离的最后一个点
   {
+    //对于前面所选择的点（选择存储前后相邻点距离的点）遍历计算
+    //假设i_cur点为A，j点为B，i_nex点为C
     if((j >= pl.size()) || (i_cur >= pl.size())) break;
+    //向量AB
     v1[0] = pl[j].x - pl[i_cur].x;
     v1[1] = pl[j].y - pl[i_cur].y;
     v1[2] = pl[j].z - pl[i_cur].z;
-
+    //向量AB叉乘向量AC，得到垂直于AC和AB的点，大小为|AB|*|AC|*sin<AB,AC>
+    //这个求出的向量的大小物理意义是：物理意义是ABC组成的平行四边形的面积
+    //式中vx，vy,vz是向量AC，是移动到后面的nex和cur之间的向量
     v2[0] = v1[1]*vz - vy*v1[2];
     v2[1] = v1[2]*vx - v1[0]*vz;
     v2[2] = v1[0]*vy - vx*v1[1];
-
+  //这个向量计算模平方的物理意义是ABC组成的平行四边形的面积的平方，（为|AC|*h，其中h是B到线AC的距离）
     double lw = v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2];
     if(lw > leng_wid)
     {
-      leng_wid = lw;
+      leng_wid = lw;//寻找，最大面积的平方（因为AC是固定的，因此寻找最大面积的平方，就是寻找距离AC最远的B）
     }
   }
 
+//此时two_dis中存储的是向量AC，即是移动到后面的nex和cur之间的向量
+//|AC*AC| / (AC*AC*h*h)<225-->h<1/15=0.0667m
+//(AC*AC*h*h)指的是ABC构成的平行四边形最大面积的平方
 
+//由于上面找到的是距离AC最远的B，如果这个B与AC之间的距离小于1/15，认为这个点太近了，不好拟合为一个平面。证明这个点或许不是平面点（但是只是一条线上的数据，说明不利哦什么）
   if((two_dis*two_dis/leng_wid) < p2l_ratio)
   {
-    curr_direct.setZero();
-    return 0;
+    curr_direct.setZero();//法向量直接设为0
+    return 0;//返回0
   }
-
+//把刚刚存起来的相邻两点之间的距离数组按照从大到小的顺序排序
   uint disarrsize = disarr.size();
   for(uint j=0; j<disarrsize-1; j++)
   {
@@ -855,15 +930,15 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
       }
     }
   }
-
+//相邻两点之间的距离的最小值过小，也直接返回？？？暂时不理解
   if(disarr[disarr.size()-2] < 1e-16)
   {
     curr_direct.setZero();
     return 0;
   }
-
+//对AVIA雷达的单独处理
   if(lidar_type==AVIA)
-  {
+  {//点与点之间距离变化太大的时候，可能与激光光束是平行的，所以也就舍弃了
     double dismax_mid = disarr[0]/disarr[disarrsize/2];
     double dismid_min = disarr[disarrsize/2]/disarr[disarrsize-2];
 
@@ -883,9 +958,9 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     }
   }
   
-  curr_direct << vx, vy, vz;
-  curr_direct.normalize();
-  return 1;
+  curr_direct << vx, vy, vz;//AC，CSDN上说是当前点的法向量，但是我觉得是方向向量
+  curr_direct.normalize();//对法向量进行归一化？？？ 我觉得是对方向向量进行归一化
+  return 1;//到这里出来才认为是平面点
 }
 
 bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir)
