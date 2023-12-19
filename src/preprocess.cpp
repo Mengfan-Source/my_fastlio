@@ -566,7 +566,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         if(mod>-0.707 && mod<0.707)//夹角范围在（45-135度之间）
         {
           // //修改ftype，两个面法向量夹角在45度和135度之间 认为是两平面边缘上的点（这是CSDN的注释，而我认为这两个向量是方向向量）
-          types[i].ftype = Edge_Plane;//认为这两个方向向量dada
+          types[i].ftype = Edge_Plane;//认为这两个方向向量dadaaaa
         }
         else
         {
