@@ -509,7 +509,9 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   // Surf
   //group_size默认值为8，
   //判断当前点后面是否还够8个点，如果够的话就逐渐减少，每次减8，就一次？
+  //如果plsize>group_size,plsize2 = plsize-group_size,否则plsize的值设为0
   plsize2 = (plsize > group_size) ? (plsize - group_size) : 0;
+
 
   Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero());//当前平面法向量（初始化为0）CSDN说是法向量，我认为是方向向量
   Eigen::Vector3d last_direct(Eigen::Vector3d::Zero());//上一个平面的法向量 CSDN说是法向量，我认为是方向向量
@@ -520,7 +522,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   //判断面点
   int plane_type;
 //head是指当前传进来的一条线上第一个非盲区内的点
-  for(uint i=head; i<plsize2; i++)
+  for(uint i=head; i<plsize2; i++)//之所以将plsize2后面的点减去，是因为在进行plane_judge时，会往后多取8个点，然后在进行点的类型判断时，由于plane_judge函数会返回一个至少往后八个点的索引，因此这一帧所有的点都计算上了
   {
     //在盲区内的点不做处理
     if(types[i].range < blind)
@@ -530,7 +532,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
 //更新i2
     i2 = i;
 //求得平面，并返回类型0 1 2
-//返回为1时，才认为当前点时平面上的点
+//返回为1时，才认为当前点是平面上的点
     plane_type = plane_judge(pl, types, i, i_nex, curr_direct);
     
     if(plane_type == 1)
@@ -558,10 +560,13 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       if(last_state==1 && last_direct.norm()>0.1)
       {
         //这里计算的是两个方向向量的夹角？？？但是CSDN说是两个法向量的夹角
+        //两个单位方向向量相乘，若两向量平行，则值会大，若两向量垂直，则值为0
+        //这是两个向量的夹角公式：得到的是两个向量夹角的余弦值
         double mod = last_direct.transpose() * curr_direct;
-        if(mod>-0.707 && mod<0.707)
+        if(mod>-0.707 && mod<0.707)//夹角范围在（45-135度之间）
         {
-          types[i].ftype = Edge_Plane;
+          // //修改ftype，两个面法向量夹角在45度和135度之间 认为是两平面边缘上的点（这是CSDN的注释，而我认为这两个向量是方向向量）
+          types[i].ftype = Edge_Plane;//认为这两个方向向量
         }
         else
         {
@@ -574,6 +579,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
     else // if(plane_type == 2)
     {
+      //plane_type=0或2的时候
       i = i_nex;
       last_state = 0;
     }
