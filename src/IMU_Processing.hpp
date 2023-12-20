@@ -56,37 +56,37 @@ class ImuProcess
   V3D cov_gyr;//角速度测量协方差
   V3D cov_acc_scale;//
   V3D cov_gyr_scale;
-  V3D cov_bias_gyr;
-  V3D cov_bias_acc;
-  double first_lidar_time;
+  V3D cov_bias_gyr;//角速度零偏的协方差
+  V3D cov_bias_acc;//加速度零偏的协方差
+  double first_lidar_time;//当前帧第一个时间点云
 
  private:
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
-  PointCloudXYZI::Ptr cur_pcl_un_;
-  sensor_msgs::ImuConstPtr last_imu_;
-  deque<sensor_msgs::ImuConstPtr> v_imu_;
-  vector<Pose6D> IMUpose;
-  vector<M3D>    v_rot_pcl_;
-  M3D Lidar_R_wrt_IMU;
-  V3D Lidar_T_wrt_IMU;
-  V3D mean_acc;
-  V3D mean_gyr;
-  V3D angvel_last;
-  V3D acc_s_last;
-  double start_timestamp_;
-  double last_lidar_end_time_;
-  int    init_iter_num = 1;
-  bool   b_first_frame_ = true;
-  bool   imu_need_init_ = true;
+  PointCloudXYZI::Ptr cur_pcl_un_;//当前帧点云未去畸变
+  sensor_msgs::ImuConstPtr last_imu_;//上一帧IMU
+  deque<sensor_msgs::ImuConstPtr> v_imu_;//IMU队列
+  vector<Pose6D> IMUpose;//IMU位姿
+  vector<M3D>    v_rot_pcl_;//未使用
+  M3D Lidar_R_wrt_IMU;//lidar到IMU的旋转外参：在IMU系下lidar的位置
+  V3D Lidar_T_wrt_IMU;//lidar到IMU的位置外参
+  V3D mean_acc;//加速度均值，用于计算方差
+  V3D mean_gyr;//角速度均值，用于计算方差
+  V3D angvel_last;//上一帧角速度
+  V3D acc_s_last;//上一帧加速度
+  double start_timestamp_;//开始时间戳
+  double last_lidar_end_time_;//上一帧雷达数据结束时间戳
+  int    init_iter_num = 1;//初始化迭代次数
+  bool   b_first_frame_ = true;//是否为第一帧
+  bool   imu_need_init_ = true;//是否需要初始化IMU
 };
-
-ImuProcess::ImuProcess()
+//构造函数：
+ImuProcess::ImuProcess()//默认是第一帧，IMU需要初始化，开始时间戳赋值为-1
     : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
 {
-  init_iter_num = 1;
-  Q = process_noise_cov();
+  init_iter_num = 1;//初始化迭代次数
+  Q = process_noise_cov();//调用use-ikfom.hpp里面的process_noise_cov完成噪声协方差的初始化
   cov_acc       = V3D(0.1, 0.1, 0.1);
   cov_gyr       = V3D(0.1, 0.1, 0.1);
   cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);
