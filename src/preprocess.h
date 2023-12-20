@@ -35,7 +35,7 @@ enum E_jump{Nr_nor, Nr_zero, Nr_180, Nr_inf, Nr_blind};
 struct orgtype
 {
   double range;//点云在xy平面距离雷达中心的距离
-  double dista; //当前点与后一个点之间的距离
+  double dista; //当前点与后一个点之间的距离的平方
   //假设雷达原点为O 前一个点为M 当前点为A 后一个点为N
   double angle[2];//这个是角OAM和OAN的cos直
   double intersect;//这是角MAN的cos值

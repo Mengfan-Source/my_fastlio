@@ -27,7 +27,7 @@
 /// *************Preconfiguration
 
 #define MAX_INI_COUNT (10)
-
+//判断两个点的时间是否前后颠倒，在处理上使用curature存储激光雷达点时间戳
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 
 /// *************IMU Process and undistortion
@@ -51,10 +51,10 @@ class ImuProcess
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
-  ofstream fout_imu;
-  V3D cov_acc;
-  V3D cov_gyr;
-  V3D cov_acc_scale;
+  ofstream fout_imu;//IMU参数输出文件
+  V3D cov_acc;//加速度测量协方差
+  V3D cov_gyr;//角速度测量协方差
+  V3D cov_acc_scale;//
   V3D cov_gyr_scale;
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
