@@ -157,6 +157,7 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 //传入参数：测量数据
+//内部主要是对x_和P_完成了初始化，这里涉及到esikfom文件内部的知识，这里暂且先不讲
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
@@ -176,50 +177,61 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     const auto &gyr_acc = meas.imu.front()->angular_velocity;//从common_lib.h中拿到imu初始时可的角速度
     mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;//第一帧加速度测量值作为初始化均值
     mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;//第一帧角速度测量值作为初始化均值
-    first_lidar_time = meas.lidar_beg_time;
+    first_lidar_time = meas.lidar_beg_time;//如果是第一帧数据，将第一帧数据测量值的雷达开始时间
   }
-
-  for (const auto &imu : meas.imu)
+//计算方差
+  for (const auto &imu : meas.imu)//拿到的所有IMU帧
   {
     const auto &imu_acc = imu->linear_acceleration;
     const auto &gyr_acc = imu->angular_velocity;
     cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
     cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
-
+//更新均值
     mean_acc      += (cur_acc - mean_acc) / N;
     mean_gyr      += (cur_gyr - mean_gyr) / N;
-
+    //.cwiseProduct()对应系数相乘
+    //每次迭代之后均值都会发生变化，最后的方差公式中减的应该是最后的均值
+    // https://blog.csdn.net/weixin_44479136/article/details/90510374 方差迭代计算公式
+    //按照博客推导出来的下面方差递推公式有两种
+    //按照博客推出来的是两种都对不上
+    //cov_acc是一个三维数组，.cwiseProduct()方法表示对应系数相乘得到的结果仍为三维数组，例如9(1,2,3).cwiseProduct((4,5,6))=(4,10,18)
     cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (N - 1.0) / (N * N);
     cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
-
+    //第二种是
+    // cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - 上一次的mean_acc)  / N;
+    // cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - 上一次的mean_gyr)  / N;
     // cout<<"acc norm: "<<cur_acc.norm()<<" "<<mean_acc.norm()<<endl;
 
     N ++;
   }
-  state_ikfom init_state = kf_state.get_x();
-  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
+  state_ikfom init_state = kf_state.get_x();   //在esekfom.hpp获得x_的状态
+  //从common_lib.h中拿到重力，并与加速度测量均值的单位重力求出SO2的旋转矩阵类型的重力加速度
+  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);//此处得到的是一个3*1的三维列向量，对测量的IMU加速度的平均值单位化后，乘以重力加速度（9.81）然后再进行单位化，作为状态的重力部分（为什么？）
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
-  init_state.bg  = mean_gyr;
+  init_state.bg  = mean_gyr;//将角速度的平均值作为角速度的零偏
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
   kf_state.change_x(init_state);
-
+//在esekfom.hpp获得P_的协方差矩阵
   esekfom::esekf<state_ikfom, 12, input_ikfom>::cov init_P = kf_state.get_P();
-  init_P.setIdentity();
-  init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;
-  init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
-  init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;
-  init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
-  init_P(21,21) = init_P(22,22) = 0.00001; 
-  kf_state.change_P(init_P);
-  last_imu_ = meas.imu.back();
+  init_P.setIdentity();//将协方差矩阵设为单位阵
+  init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001; //将协方差矩阵的位置和旋转的协方差置为0.00001
+  init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;//将协方差矩阵的速度和位姿的协方差置为0.00001
+  init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;//将协方差矩阵的重力和姿态的协方差置为0.0001
+  init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001; //将协方差矩阵的陀螺仪偏差和姿态的协方差置为0.001
+  init_P(21,21) = init_P(22,22) = 0.00001; //将协方差矩阵的lidar和imu外参位移量的协方差置为0.00001
+  kf_state.change_P(init_P);//将初始化协方差矩阵传入esekfom.hpp中的P_
+  last_imu_ = meas.imu.back();//将最后一帧的imu数据传入last_imu_中，暂时没用到
 
 }
-
+//在UndistortPcl函数中不但有IMU的前向信息，还有激光雷达去畸变的问题，这一节我们围绕着IMU的正向传播展开，代码中通过迭代的形式完成了IMU数据的更新，并将acc和gyro的数据传入到ESKF中，详细的公式我们后面再来讲。
+//输入：measuregroup包含激光点云数据和IMU队列信息
+//状态信息
+//在函数体里面执行运算的，经过去畸变处理的点云信息
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
-  /*** add the imu of the last frame-tail to the of current frame-head ***/
+  /*** add the imu of the last frame-tail to the of current frame-head 将上一帧尾部的IMU数据，添加到当前帧的帧头***/
   auto v_imu = meas.imu;
   v_imu.push_front(last_imu_);
   const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
