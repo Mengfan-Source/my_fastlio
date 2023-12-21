@@ -636,19 +636,22 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   }
 
   plsize2 = plsize > 3 ? plsize - 3 : 0;
+  //判断边缘点
   for(uint i=head+3; i<plsize2; i++)
   {
+    //当点在盲区或者点不属于正常点和可能的平面点时，该点直接跳过不予处理
     if(types[i].range<blind || types[i].ftype>=Real_Plane)
     {
       continue;
     }
 
+//点与点之间不能离的太近，否则直接跳过
     if(types[i-1].dista<1e-16 || types[i].dista<1e-16)
     {
       continue;
     }
 
-    Eigen::Vector3d vec_a(pl[i].x, pl[i].y, pl[i].z);
+    Eigen::Vector3d vec_a(pl[i].x, pl[i].y, pl[i].z);//由当前点组成的向量
     Eigen::Vector3d vecs[2];
 
     for(int j=0; j<2; j++)
@@ -658,38 +661,42 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       {
         m = 1;
       }
-
+//如果当前的前/后一个点在盲区内
       if(types[i+m].range < blind)
       {
-        if(types[i].range > inf_bound)
+        if(types[i].range > inf_bound)//并且当前点大于10m，那么则认为跳变较远
         {
-          types[i].edj[j] = Nr_inf;
+          types[i].edj[j] = Nr_inf;//赋予该点前/后两点类型为Nr_inf(跳变较远)
         }
-        else
+        else//否则
         {
-          types[i].edj[j] = Nr_blind;
+          types[i].edj[j] = Nr_blind;//赋予该点前/后两点类型为Nr_blind(在盲区)
         }
-        continue;
+        continue;//直接跳出当前点
       }
-
+      //若当前点不在盲区内
+      //设置雷达坐标系原点为O，当前点为A，前/后一个点为M和N   
       vecs[j] = Eigen::Vector3d(pl[i+m].x, pl[i+m].y, pl[i+m].z);
       vecs[j] = vecs[j] - vec_a;
-      
+      //dot运算是计算点积
+      //这个是角OAM和OAN的cos直
       types[i].angle[j] = vec_a.dot(vecs[j]) / vec_a.norm() / vecs[j].norm();
-      if(types[i].angle[j] < jump_up_limit)
+      if(types[i].angle[j] < jump_up_limit)//cos(170)
       {
-        types[i].edj[j] = Nr_180;
+        types[i].edj[j] = Nr_180;//认为M在OA延长线上
       }
       else if(types[i].angle[j] > jump_down_limit)
       {
-        types[i].edj[j] = Nr_zero;
+        types[i].edj[j] = Nr_zero;//认为M在OA上
       }
     }
-
+    //这个是角MAN的cos
+    //Prev默认是0，Next是1
     types[i].intersect = vecs[Prev].dot(vecs[Next]) / vecs[Prev].norm() / vecs[Next].norm();
+    //前一个点是正常点&&下一个点在激光线上&&当前点与后一个点的距离大于0.025m&&当前点与后一个点的距离大于当前点与前一个点距离的四倍
     if(types[i].edj[Prev]==Nr_nor && types[i].edj[Next]==Nr_zero && types[i].dista>0.0225 && types[i].dista>4*types[i-1].dista)
     {
-      if(types[i].intersect > cos160)
+      if(types[i].intersect > cos160)//角MAN要小于160度，不然就平行于激光了
       {
         if(edge_jump_judge(pl, types, i, Prev))
         {
@@ -707,6 +714,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
         }
       }
     }
+    //前面点是正常点&&（当前点到雷达中心距离>10，并且后点在盲区<blind(4m)）认为这是边缘点
     else if(types[i].edj[Prev]==Nr_nor && types[i].edj[Next]==Nr_inf)
     {
       if(edge_jump_judge(pl, types, i, Prev))
@@ -722,29 +730,31 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       }
      
     }
+    //前后没有正常点：
     else if(types[i].edj[Prev]>Nr_nor && types[i].edj[Next]>Nr_nor)
     {
       if(types[i].ftype == Nor)
       {
-        types[i].ftype = Wire;
+        types[i].ftype = Wire;//程序中应该没有使用，当成空间中小的线段或者无用点了
       }
     }
   }
-
-  plsize2 = plsize-1;
+//继续找平面点
+  plsize2 = plsize-1;//plsize中存放的是当前传入扫描线中总点的数量
   double ratio;
   for(uint i=head+1; i<plsize2; i++)
   {
+    //当前点、前一个点、后一个点都需要不在盲区里面，若有一个在盲区内则跳过这个点
     if(types[i].range<blind || types[i-1].range<blind || types[i+1].range<blind)
     {
       continue;
     }
-    
+    //当前点与前一个点、当前点与后一个点之间的距离不能太近
     if(types[i-1].dista<1e-8 || types[i].dista<1e-8)
     {
       continue;
     }
-
+//如果当前点为正常点：Nor是默认点吗，这里判断的是上面没有判断过的点吗？？，走到这里后好像没有点满足判断条件？？？
     if(types[i].ftype == Nor)
     {
       if(types[i-1].dista > types[i].dista)
@@ -755,7 +765,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       {
         ratio = types[i].dista / types[i-1].dista;
       }
-
+//对于一个点如果MAN角度大于172.5度&&前后点的间距变化率小于1.2，则继续执行
       if(types[i].intersect<smallp_intersect && ratio < smallp_ratio)
       {
         if(types[i-1].ftype == Nor)
@@ -770,17 +780,19 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       }
     }
   }
-
+//存储平面点
   int last_surface = -1;
   for(uint j=head; j<plsize; j++)
   {
+    //平面点和可能的平面点
     if(types[j].ftype==Poss_Plane || types[j].ftype==Real_Plane)
     {
       if(last_surface == -1)
       {
         last_surface = j;
       }
-    
+   //通常连着好几个都是面点
+   //必须在采样间隔上的平面点才使用（这里是无差别滤波，从每次找到面点开始，每几个点才取一个） 
       if(j == uint(last_surface+point_filter_num-1))
       {
         PointType ap;
@@ -795,13 +807,15 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       }
     }
     else
-    {
+    {//条边较大的边缘边的点 位于平面边缘上的点
       if(types[j].ftype==Edge_Jump || types[j].ftype==Edge_Plane)
       {
         pl_corn.push_back(pl[j]);
       }
+      //假如赏赐找到的面点被无差别滤掉了，而此时已经到了边缘
       if(last_surface != -1)
       {
+        //取上次面点到此次边缘线之间的所有点的重心当作一个面点存储进去
         PointType ap;
         for(uint k=last_surface; k<j; k++)
         {
@@ -968,17 +982,19 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   curr_direct.normalize();//对法向量进行归一化？？？ 我觉得是对方向向量进行归一化
   return 1;//到这里出来才认为是平面点
 }
-
+//边缘特征判断，主要是为了防止LOAM里面的两种不考虑的点，进行判断是否是边缘点
+//输入：一条激光线上的激光点pl，这条线上的激光点的特征数组，i要传入的点在这条线上的位置，nor_dir指的是0/1，若传进来为0指的是前一个点。为1指的是后一个点
+//输出：
 bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir)
 {
-  if(nor_dir == 0)
+  if(nor_dir == 0)//如果nor_dir方向为前一个点代表要向前判断，判断前面两个点
   {
     if(types[i-1].range<blind || types[i-2].range<blind)
     {
-      return false;
+      return false;//如果前面的两个点有一个在盲区里面直接返回false
     }
   }
-  else if(nor_dir == 1)
+  else if(nor_dir == 1)//如果nor_dir方向为前后，代表要向后判断，判断后面两个点
   {
     if(types[i+1].range<blind || types[i+2].range<blind)
     {
@@ -999,7 +1015,7 @@ bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &type
   d1 = sqrt(d1);
   d2 = sqrt(d2);
 
- 
+ //如果相邻点的距离变化大则可能是被遮挡，不把他当作边缘点
   if(d1>edgea*d2 || (d1-d2)>edgeb)
   {
     return false;

@@ -27,7 +27,7 @@
 /// *************Preconfiguration
 
 #define MAX_INI_COUNT (10)
-
+//判断两个点的时间是否前后颠倒，在处理上使用curature存储激光雷达点时间戳
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 
 /// *************IMU Process and undistortion
@@ -51,89 +51,92 @@ class ImuProcess
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
-  ofstream fout_imu;
-  V3D cov_acc;
-  V3D cov_gyr;
-  V3D cov_acc_scale;
+  ofstream fout_imu;//IMU参数输出文件
+  V3D cov_acc;//加速度测量协方差
+  V3D cov_gyr;//角速度测量协方差
+  V3D cov_acc_scale;//
   V3D cov_gyr_scale;
-  V3D cov_bias_gyr;
-  V3D cov_bias_acc;
-  double first_lidar_time;
+  V3D cov_bias_gyr;//角速度零偏的协方差
+  V3D cov_bias_acc;//加速度零偏的协方差
+  double first_lidar_time;//当前帧第一个时间点云
 
  private:
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
-  PointCloudXYZI::Ptr cur_pcl_un_;
-  sensor_msgs::ImuConstPtr last_imu_;
-  deque<sensor_msgs::ImuConstPtr> v_imu_;
-  vector<Pose6D> IMUpose;
-  vector<M3D>    v_rot_pcl_;
-  M3D Lidar_R_wrt_IMU;
-  V3D Lidar_T_wrt_IMU;
-  V3D mean_acc;
-  V3D mean_gyr;
-  V3D angvel_last;
-  V3D acc_s_last;
-  double start_timestamp_;
-  double last_lidar_end_time_;
-  int    init_iter_num = 1;
-  bool   b_first_frame_ = true;
-  bool   imu_need_init_ = true;
+  PointCloudXYZI::Ptr cur_pcl_un_;//当前帧点云未去畸变
+  sensor_msgs::ImuConstPtr last_imu_;//上一帧IMU
+  deque<sensor_msgs::ImuConstPtr> v_imu_;//IMU队列
+  vector<Pose6D> IMUpose;//IMU位姿
+  vector<M3D>    v_rot_pcl_;//未使用
+  M3D Lidar_R_wrt_IMU;//lidar到IMU的旋转外参：在IMU系下lidar的位置
+  V3D Lidar_T_wrt_IMU;//lidar到IMU的位置外参
+  V3D mean_acc;//加速度均值，用于计算方差
+  V3D mean_gyr;//角速度均值，用于计算方差
+  V3D angvel_last;//上一帧角速度
+  V3D acc_s_last;//上一帧加速度
+  double start_timestamp_;//开始时间戳
+  double last_lidar_end_time_;//上一帧雷达数据结束时间戳
+  int    init_iter_num = 1;//初始化迭代次数
+  bool   b_first_frame_ = true;//是否为第一帧
+  bool   imu_need_init_ = true;//是否需要初始化IMU
 };
-
-ImuProcess::ImuProcess()
+//构造函数：
+ImuProcess::ImuProcess()//默认是第一帧，IMU需要初始化，开始时间戳赋值为-1
     : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
 {
-  init_iter_num = 1;
-  Q = process_noise_cov();
-  cov_acc       = V3D(0.1, 0.1, 0.1);
-  cov_gyr       = V3D(0.1, 0.1, 0.1);
-  cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);
-  cov_bias_acc  = V3D(0.0001, 0.0001, 0.0001);
+  init_iter_num = 1;//初始化迭代次数
+  //IKFoM(Iterated Kalman Filters on Manifolds)是港大开源的一个计算高效且方便的迭代卡尔曼滤波器工具包。
+  //https://github.com/hku-mars/IKFoM.git
+  //"MTK" 可能是指 "Manifold Toolkit"，这是一个用于处理航空航天导航、估计与控制问题的开源 C++ 模板库
+  Q = process_noise_cov();//调用use-ikfom.hpp里面的process_noise_cov完成噪声协方差的初始化
+  cov_acc       = V3D(0.1, 0.1, 0.1);//加速度测量协方差矩阵初始化
+  cov_gyr       = V3D(0.1, 0.1, 0.1);//角速度测量协方差矩阵初始化
+  cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);//角速度测量零偏协方差矩阵
+  cov_bias_acc  = V3D(0.0001, 0.0001, 0.0001);//加速度测量零偏协方差矩阵
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
-  angvel_last     = Zero3d;
-  Lidar_T_wrt_IMU = Zero3d;
-  Lidar_R_wrt_IMU = Eye3d;
-  last_imu_.reset(new sensor_msgs::Imu());
+  angvel_last     = Zero3d;//上一帧角速度初始化
+  Lidar_T_wrt_IMU = Zero3d;//lidar-IMU的位置外参初始化
+  Lidar_R_wrt_IMU = Eye3d;//lidar-IMU的旋转外参初始化
+  last_imu_.reset(new sensor_msgs::Imu());//上一帧IMU初始化
 }
 
 ImuProcess::~ImuProcess() {}
-
+//重置参数
 void ImuProcess::Reset() 
 {
   // ROS_WARN("Reset ImuProcess");
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
   angvel_last       = Zero3d;
-  imu_need_init_    = true;
-  start_timestamp_  = -1;
-  init_iter_num     = 1;
-  v_imu_.clear();
-  IMUpose.clear();
-  last_imu_.reset(new sensor_msgs::Imu());
-  cur_pcl_un_.reset(new PointCloudXYZI());
+  imu_need_init_    = true;//是否需要初始化IMU
+  start_timestamp_  = -1;//开始时间戳
+  init_iter_num     = 1;//初始化迭代次数16
+  v_imu_.clear();//imu队列清空
+  IMUpose.clear();//imu位姿清空
+  last_imu_.reset(new sensor_msgs::Imu());//上一帧IMU初始化为原始状态
+  cur_pcl_un_.reset(new PointCloudXYZI());//当前点云帧未去畸变初始化
 }
-
+//传入外参，包含R，T
 void ImuProcess::set_extrinsic(const MD(4,4) &T)
 {
   Lidar_T_wrt_IMU = T.block<3,1>(0,3);
   Lidar_R_wrt_IMU = T.block<3,3>(0,0);
 }
-
+//传入外参，包含T
 void ImuProcess::set_extrinsic(const V3D &transl)
 {
   Lidar_T_wrt_IMU = transl;
   Lidar_R_wrt_IMU.setIdentity();
 }
-
+//传入外参，包含R，T
 void ImuProcess::set_extrinsic(const V3D &transl, const M3D &rot)
 {
   Lidar_T_wrt_IMU = transl;
   Lidar_R_wrt_IMU = rot;
 }
-
+//传入陀螺仪角速度协方差
 void ImuProcess::set_gyr_cov(const V3D &scaler)
 {
   cov_gyr_scale = scaler;
@@ -153,23 +156,26 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
 {
   cov_bias_acc = b_a;
 }
-
+//传入参数：测量数据
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
+  //1.初始化重力、陀螺仪偏差、acc和陀螺仪协方差
+  //2.将加速度测量值标准化为单位重力
+  //这里英国是静止初始化
   
   V3D cur_acc, cur_gyr;
   
-  if (b_first_frame_)
+  if (b_first_frame_)//判断是否为第一帧，如果是第一帧
   {
-    Reset();
-    N = 1;
-    b_first_frame_ = false;
-    const auto &imu_acc = meas.imu.front()->linear_acceleration;
-    const auto &gyr_acc = meas.imu.front()->angular_velocity;
-    mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;
-    mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
+    Reset();//重置参数
+    N = 1;//将迭代次数置为1
+    b_first_frame_ = false;////将是否为第一帧的标志为清零
+    const auto &imu_acc = meas.imu.front()->linear_acceleration;//从common_lib.h中拿到imu初始时刻的加速度
+    const auto &gyr_acc = meas.imu.front()->angular_velocity;//从common_lib.h中拿到imu初始时可的角速度
+    mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;//第一帧加速度测量值作为初始化均值
+    mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;//第一帧角速度测量值作为初始化均值
     first_lidar_time = meas.lidar_beg_time;
   }
 
