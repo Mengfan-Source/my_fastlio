@@ -48,7 +48,7 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
-  Eigen::Matrix<double, 12, 12> Q;
+  Eigen::Matrix<double, 12, 12> Q;//定义噪声协方差
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
   ofstream fout_imu;//IMU参数输出文件
@@ -226,57 +226,62 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
 
 }
 //在UndistortPcl函数中不但有IMU的前向信息，还有激光雷达去畸变的问题，这一节我们围绕着IMU的正向传播展开，代码中通过迭代的形式完成了IMU数据的更新，并将acc和gyro的数据传入到ESKF中，详细的公式我们后面再来讲。
-//输入：measuregroup包含激光点云数据和IMU队列信息
+//输入：measuregroup包含激光点云数据和IMU队列信息，上一帧结束后的状态量
 //状态信息
-//在函数体里面执行运算的，经过去畸变处理的点云信息
+//在函数体里面执行运算的，经过去畸变处理的点云信息，运算后会传出
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
   /*** add the imu of the last frame-tail to the of current frame-head 将上一帧尾部的IMU数据，添加到当前帧的帧头***/
   auto v_imu = meas.imu;
-  v_imu.push_front(last_imu_);
-  const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
-  const double &imu_end_time = v_imu.back()->header.stamp.toSec();
+  v_imu.push_front(last_imu_);//last_imu是全局变量
+  const double &imu_beg_time = v_imu.front()->header.stamp.toSec();//拿到当前帧头部的IMU时间，也就是上一帧尾部的imu时间戳
+  const double &imu_end_time = v_imu.back()->header.stamp.toSec();//拿到当前帧尾部时间戳
   const double &pcl_beg_time = meas.lidar_beg_time;
-  const double &pcl_end_time = meas.lidar_end_time;
+  const double &pcl_end_time = meas.lidar_end_time;//PCL开始/结束时间戳
   
-  /*** sort point clouds by offset time ***/
+  /*** sort point clouds by offset time 根据点云中每个点的时间戳对点云进行重新排序 ***/
   pcl_out = *(meas.lidar);
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
   // cout<<"[ IMU Process ]: Process lidar from "<<pcl_beg_time<<" to "<<pcl_end_time<<", " \
   //          <<meas.imu.size()<<" imu msgs from "<<imu_beg_time<<" to "<<imu_end_time<<endl;
 
-  /*** Initialize IMU pose ***/
-  state_ikfom imu_state = kf_state.get_x();
+  /*** Initialize IMU pose 初始化IMU位姿***/
+  state_ikfom imu_state = kf_state.get_x();//获取上一次KF估计的后验状态作为本次IMU预测的初始状态
+  //IMUpose是pose6d格式的
+  //将初始状态加入IMUpose中，包含有时间间隔，上一帧加速度，上一帧角速度，上一帧速度，上一帧位置，上一帧旋转矩阵
   IMUpose.clear();
   IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
 
-  /*** forward propagation at each imu point ***/
+  /*** forward propagation at each imu point 在每一个IMU点的前向传播***/
+  //前向传播对应的参数：平均角速度、平均加速度、IMU加速度、IMU速度、IMU位置
   V3D angvel_avr, acc_avr, acc_imu, vel_imu, pos_imu;
-  M3D R_imu;
+  M3D R_imu;//IMU旋转矩阵
+  double dt = 0;////时间间隔
 
-  double dt = 0;
-
-  input_ikfom in;
+  input_ikfom in;//eskf传入的参数
+  //这里不包括IMU队列的最后一帧IMU数据
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
-    auto &&head = *(it_imu);
-    auto &&tail = *(it_imu + 1);
+    auto &&head = *(it_imu);//拿到当前帧的IMU数据
+    auto &&tail = *(it_imu + 1);//拿到下一帧的IMU数据
     
-    if (tail->header.stamp.toSec() < last_lidar_end_time_)    continue;
-    
+    if (tail->header.stamp.toSec() < last_lidar_end_time_)    continue;//判断时间先后顺序，不符合直接continue
+    //计算当前帧和下一帧的平均角度和平均速度
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
                 0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
     acc_avr   <<0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+    
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
-
+    //通过重力数值对加速度进行以下微调？？？
     acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
-
+//如果IMU开始时刻早于上次激光雷达数据的最晚时刻（因为次将上次最后一个IMU插入到此次开头了。所以会出现一次这种情况）
     if(head->header.stamp.toSec() < last_lidar_end_time_)
     {
+      //从赏赐雷达时刻末尾开始传播，计算与此次IMU结尾之间的时间差
       dt = tail->header.stamp.toSec() - last_lidar_end_time_;
       // dt = tail->header.stamp.toSec() - pcl_beg_time;
     }
@@ -284,37 +289,43 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     {
       dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
     }
-    
+    //原始测量的中值作为更新
     in.acc = acc_avr;
     in.gyro = angvel_avr;
+    //配置协方差矩阵（12*12？）只赋值给协方差矩阵的对角元素，也就是方差
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
     Q.block<3, 3>(3, 3).diagonal() = cov_acc;
-    Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
-    Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
+    Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;//猜测：就是bg的值
+    Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;//猜测：就是ba的值
+    //IMU前向传播，每次传播的时间间隔为dt
     kf_state.predict(dt, Q, in);
-
+  //进行前向传播(IMU预测过程)之后，保留当前IMU预测过程的状态（这是在一个遍历的for循环中）
     /* save the poses at each IMU measurements */
     imu_state = kf_state.get_x();
-    angvel_last = angvel_avr - imu_state.bg;
-    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);
+    angvel_last = angvel_avr - imu_state.bg;//更新angvel_last:角速度测量值的平均值-IMU预测过程计算出来的零偏
+    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);//更新acc_avr:加速度测量值的平均值-IMU预测过程计算出来的零偏，然后转换到IMU坐标系下
     for(int i=0; i<3; i++)
     {
-      acc_s_last[i] += imu_state.grav[i];
+      acc_s_last[i] += imu_state.grav[i];//加上重力，得到世界坐标系下的加速度
     }
+    //后一个IMU距离此次雷达开始的时间间隔
     double &&offs_t = tail->header.stamp.toSec() - pcl_beg_time;
     IMUpose.push_back(set_pose6d(offs_t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
   }
 
-  /*** calculated the pos and attitude prediction at the frame-end ***/
+  /*** calculated the pos and attitude prediction at the frame-end 计算这一次数据中最后一帧IMU数据的位置和姿态的预测部分，因为前面的for循环并不包含这次数据的最后一帧IMU数据***/
+  //判断雷达结束时间是否晚于IMU，最后一个IMU时刻可能遭遇雷达末尾，也可能晚于雷达末尾
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
-  kf_state.predict(dt, Q, in);
+  kf_state.predict(dt, Q, in);//保存这一帧最后一个雷达测量的结束时间，以便于下一帧使用
   
-  imu_state = kf_state.get_x();
-  last_imu_ = meas.imu.back();
+  imu_state = kf_state.get_x();//更新IMU状态，以便下一次使用
+  last_imu_ = meas.imu.back();//保存最后一帧数据，以便下一帧使用
   last_lidar_end_time_ = pcl_end_time;
 
-  /*** undistort each lidar point (backward propagation) ***/
+  /*** undistort each lidar point (backward propagation) 反向传播，激光雷达点云去畸变***/
+    /*** 在处理完所有的IMU预测后，剩下的就是对激光的去畸变了 ***/
+  // 基于IMU预测对lidar点云去畸变
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
   auto it_pcl = pcl_out.points.end() - 1;
   for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
@@ -323,23 +334,26 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     auto tail = it_kp;
     R_imu<<MAT_FROM_ARRAY(head->rot);
     // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
-    vel_imu<<VEC_FROM_ARRAY(head->vel);
-    pos_imu<<VEC_FROM_ARRAY(head->pos);
-    acc_imu<<VEC_FROM_ARRAY(tail->acc);
-    angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
+    vel_imu<<VEC_FROM_ARRAY(head->vel);//拿到前一帧的IMU速度
+    pos_imu<<VEC_FROM_ARRAY(head->pos);//前一帧的IMU位置(在全局坐标系下的位置？)
+    acc_imu<<VEC_FROM_ARRAY(tail->acc);//后一帧的IMU加速度
+    angvel_avr<<VEC_FROM_ARRAY(tail->gyr);//后一帧的IMU角速度
 
     for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
     {
       dt = it_pcl->curvature / double(1000) - head->offset_time;
 
-      /* Transform to the 'end' frame, using only the rotation
-       * Note: Compensation direction is INVERSE of Frame's moving direction
-       * So if we want to compensate a point at timestamp-i to the frame-e
-       * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
-      M3D R_i(R_imu * Exp(angvel_avr, dt));
+      /* Transform to the 'end' frame, using only the rotation变换到“结束”帧，仅使用旋转
+       * Note: Compensation direction is INVERSE of Frame's moving direction注意：补偿方向与帧的移动方向相反
+       * So if we want to compensate a point at timestamp-i to the frame-e：所以如果我们向补偿位于时间戳i的一个点到帧e的一个点
+       * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame 其中T_ei在全局坐标系中表示*/
+      //R_i：R_imu前一帧IMU数据相对于全局坐标系的旋转量
+      M3D R_i(R_imu * Exp(angvel_avr, dt));//点所在时刻的旋转矩阵
       
       V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
+      //T_ei是在全局坐标系下：it_pcl相对于这一帧激光雷达数据末尾时间戳的时间差
       V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
+      //conjugate指的是矩阵的共轭，对于旋转矩阵来说（单位实对陈矩阵）矩阵的共轭等于矩阵的转置
       V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
       
       // save Undistorted points and their rotation
