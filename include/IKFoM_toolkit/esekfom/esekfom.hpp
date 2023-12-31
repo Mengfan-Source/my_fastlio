@@ -76,6 +76,9 @@ struct share_datastruct
 //used for iterated error state EKF update
 //for the aim to calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function.
 //applied for measurement as an Eigen matrix whose dimension is changing
+//用于迭代误差状态EKF更新
+//目的是通过一个函数同时计算测量值（z）、估计测量值（h）、偏微分矩阵（h_x，h_v）和噪声协方差（R）。
+//作为维度变化的特征矩阵应用于测量
 template<typename T>
 struct dyn_share_datastruct
 {

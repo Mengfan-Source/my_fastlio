@@ -164,7 +164,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
    ** 2. normalize the acceleration measurenments to unit gravity **/
   //1.初始化重力、陀螺仪偏差、acc和陀螺仪协方差
   //2.将加速度测量值标准化为单位重力
-  //这里英国是静止初始化
+  //这里应该是静止初始化
   
   V3D cur_acc, cur_gyr;
   
@@ -281,7 +281,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 //如果IMU开始时刻早于上次激光雷达数据的最晚时刻（因为次将上次最后一个IMU插入到此次开头了。所以会出现一次这种情况）
     if(head->header.stamp.toSec() < last_lidar_end_time_)
     {
-      //从赏赐雷达时刻末尾开始传播，计算与此次IMU结尾之间的时间差
+      //从上次雷达时刻末尾开始传播，计算与此次IMU结尾之间的时间差
       dt = tail->header.stamp.toSec() - last_lidar_end_time_;
       // dt = tail->header.stamp.toSec() - pcl_beg_time;
     }
@@ -293,6 +293,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     in.acc = acc_avr;
     in.gyro = angvel_avr;
     //配置协方差矩阵（12*12？）只赋值给协方差矩阵的对角元素，也就是方差
+    //.diagonal(): 这是 Eigen 中的一个方法，用于获取矩阵的对角线部分
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
     Q.block<3, 3>(3, 3).diagonal() = cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;//猜测：就是bg的值
@@ -303,7 +304,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     /* save the poses at each IMU measurements */
     imu_state = kf_state.get_x();
     angvel_last = angvel_avr - imu_state.bg;//更新angvel_last:角速度测量值的平均值-IMU预测过程计算出来的零偏
-    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);//更新acc_avr:加速度测量值的平均值-IMU预测过程计算出来的零偏，然后转换到IMU坐标系下
+    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);//更新acc_avr:加速度测量值的平均值-IMU预测过程计算出来的零偏，然后转换到IMU坐标系下（我认为英应该是转到世界坐标系下）
     for(int i=0; i<3; i++)
     {
       acc_s_last[i] += imu_state.grav[i];//加上重力，得到世界坐标系下的加速度
@@ -351,7 +352,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       M3D R_i(R_imu * Exp(angvel_avr, dt));//点所在时刻的旋转矩阵
       
       V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
-      //T_ei是在全局坐标系下：it_pcl相对于这一帧激光雷达数据末尾时间戳的时间差
+      //T_ei是在全局坐标系下：it_pcl相对于这一帧激光雷达数据末尾时间戳的时间差（所造成的相对位置偏差）
       V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
       //conjugate指的是矩阵的共轭，对于旋转矩阵来说（单位实对陈矩阵）矩阵的共轭等于矩阵的转置
       V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
@@ -365,18 +366,19 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     }
   }
 }
-
+//最后一部分是IMU的主程序，这里主要是调用上面的IMU_Init和UndistorPCL
 void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   double t1,t2,t3;
   t1 = omp_get_wtime();
 
-  if(meas.imu.empty()) {return;};
+  if(meas.imu.empty()) {return;};//拿到当前IMU帧为空，直接返回
   ROS_ASSERT(meas.lidar != nullptr);
 
   if (imu_need_init_)
   {
     /// The very first lidar frame
+    //第一个激光雷达帧
     IMU_init(meas, kf_state, init_iter_num);
 
     imu_need_init_ = true;
@@ -386,7 +388,7 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
     {
-      cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
+      cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);//在上面IMU_init基础上乘上缩放系数
       imu_need_init_ = false;
 
       cov_acc = cov_acc_scale;
@@ -399,7 +401,7 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
     return;
   }
-
+//正向传播、反向传播、去畸变
   UndistortPcl(meas, kf_state, *cur_pcl_un_);
 
   t2 = omp_get_wtime();

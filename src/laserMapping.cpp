@@ -318,13 +318,16 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     }
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
-    p_pre->process(msg, ptr);//点云预处理，处理之后得到ptr
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(msg->header.stamp.toSec());
-    last_timestamp_lidar = msg->header.stamp.toSec();
-    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    //点云预处理，处理之后得到ptr
+    //如果不进行特征点提取操作：这里返回的ptr是间隔采样后，并且相邻间距不太小、去除盲区的所有点
+    //如果进行特征提取操作：经过给特征、最后只返回平面点？
+    p_pre->process(msg, ptr);
+    lidar_buffer.push_back(ptr);//将预处理后的点云放入缓冲区
+    time_buffer.push_back(msg->header.stamp.toSec());//将时间放入缓冲区
+    last_timestamp_lidar = msg->header.stamp.toSec();//记录最后一个时间
+    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;//记录这一帧点云处理的总时间
     mtx_buffer.unlock();
-    sig_buffer.notify_all();
+    sig_buffer.notify_all();//唤醒所有线程
 }
 
 double timediff_lidar_wrt_imu = 0.0;
@@ -341,15 +344,16 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
         lidar_buffer.clear();
     }
     last_timestamp_lidar = msg->header.stamp.toSec();
-    
+    //如果不需要进行时间同步，而IMU时间戳和雷达时间戳相差大于十秒，则输出错误信息
     if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
     {
         printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
     }
-
+    //如果需要时间同步，当IMU时间戳和雷达时间戳相差大于1s时，进行时间同步
     if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
     {
-        timediff_set_flg = true;
+        timediff_set_flg = true;//标记已经进行时间同步
+        //计算出相应的时间差并+0.1秒
         timediff_lidar_wrt_imu = last_timestamp_lidar + 0.1 - last_timestamp_imu;
         printf("Self sync IMU and LiDAR, time diff is %.10lf \n", timediff_lidar_wrt_imu);
     }
@@ -363,7 +367,7 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
-
+//接收IMU数据，将IMU数据保存到IMU数据缓存队列中，这个程序中仅有IMU帧对齐的操作
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) 
 {
     publish_count ++;
@@ -371,6 +375,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
     msg->header.stamp = ros::Time().fromSec(msg_in->header.stamp.toSec() - time_diff_lidar_to_imu);
+    //将IMU和激光雷达点云的时间戳对其
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
         msg->header.stamp = \
@@ -380,7 +385,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     double timestamp = msg->header.stamp.toSec();
 
     mtx_buffer.lock();
-
+//如果当前IMU的时间戳小于上一个时刻IMU的时间戳，则IMU数据有误，将IMU数据缓存队列清空
     if (timestamp < last_timestamp_imu)
     {
         ROS_WARN("imu loop back, clear buffer");
@@ -388,23 +393,26 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     }
 
     last_timestamp_imu = timestamp;
-
+//将IMU数据保存到IMU数据缓存队列中
     imu_buffer.push_back(msg);
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
+    mtx_buffer.unlock();//解锁
+    sig_buffer.notify_all();//唤醒阻塞的线程，当持有锁的线程释放锁时，这些线程中的一个会获得锁。而其余的会接着尝试获得锁
 }
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
+//时间戳对齐，这部分主要处理了buffer中的数据，将两帧激光雷达点云数据时间内的IMU数据从缓存队列中取出，进行时间对齐，并保存到meas中
 bool sync_packages(MeasureGroup &meas)
 {
-    if (lidar_buffer.empty() || imu_buffer.empty()) {
+    if (lidar_buffer.empty() || imu_buffer.empty()) {//如果雷达buffer或者imubuffer中没有数据，返回false
         return false;
     }
 
     /*** push a lidar scan ***/
+    //如果还没有把lidar数据放到meas中的话，就执行以下操作？？
     if(!lidar_pushed)
     {
+        //从激光雷达点云缓存队列中取出点云数据，放入meas
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
         if (meas.lidar->points.size() <= 1) // time too little
@@ -427,7 +435,7 @@ bool sync_packages(MeasureGroup &meas)
 
         lidar_pushed = true;
     }
-
+//最新的IMU时间戳(队尾的)不能早于雷达的end时间戳，因为前面对齐的时候是加了0.1的
     if (last_timestamp_imu < lidar_end_time)
     {
         return false;
@@ -451,6 +459,7 @@ bool sync_packages(MeasureGroup &meas)
 }
 
 int process_increments = 0;
+//将点插入和降采样插入，放在ikd-tree里面讲
 void map_incremental()
 {
     PointVector PointToAdd;
@@ -500,16 +509,17 @@ void map_incremental()
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
 
-PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
-PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));//创建一个点云用于存储等待发布的点云
+PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());//创建一个点云用于存储等待保存的点云
 void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
 {
     if(scan_pub_en)
     {
+        //判断是否需要降采样
         PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
-        int size = laserCloudFullRes->points.size();
+        int size = laserCloudFullRes->points.size();//获取待转换点云的大小
         PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
+                        new PointCloudXYZI(size, 1));//创建一个点云用于存储转换到世界坐标系的点云
 
         for (int i = 0; i < size; i++)
         {
@@ -525,7 +535,7 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
         publish_count -= PUBFRAME_PERIOD;
     }
 
-    /**************** save map ****************/
+    /**************** save map ****************把结果压入到PCD中/
     /* 1. make sure you have enough memories
     /* 2. noted that pcd save will influence the real-time performences **/
     if (pcd_save_en)
@@ -555,7 +565,7 @@ void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
         }
     }
 }
-
+//把去除畸变的雷达系下的点云转到IMU系下
 void publish_frame_body(const ros::Publisher & pubLaserCloudFull_body)
 {
     int size = feats_undistort->points.size();
@@ -590,7 +600,7 @@ void publish_effect_world(const ros::Publisher & pubLaserCloudEffect)
     laserCloudFullRes3.header.frame_id = "camera_init";
     pubLaserCloudEffect.publish(laserCloudFullRes3);
 }
-
+//发布ikd-tree地图
 void publish_map(const ros::Publisher & pubLaserCloudMap)
 {
     sensor_msgs::PointCloud2 laserCloudMap;
@@ -600,6 +610,7 @@ void publish_map(const ros::Publisher & pubLaserCloudMap)
     pubLaserCloudMap.publish(laserCloudMap);
 }
 
+//设置输出的t,q，在publish_odometry,publish_path调用
 template<typename T>
 void set_posestamp(T & out)
 {
@@ -621,8 +632,10 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
     set_posestamp(odomAftMapped.pose);
     pubOdomAftMapped.publish(odomAftMapped);
     auto P = kf.get_P();
-    for (int i = 0; i < 6; i ++)
+    for (int i = 0; i < 6; i ++)//设置协方差矩阵，P里面先是旋转后是位置，这个pose里面先是位置后是旋转，所以对应的协方差要对调一下
     {
+        //odomAftMapped.pose.covariance是一个包含36个double型数据的队列
+        //P是一个n*n的矩阵，n是几不知道
         int k = i < 3 ? i + 3 : i - 3;
         odomAftMapped.pose.covariance[i*6 + 0] = P(k, 3);
         odomAftMapped.pose.covariance[i*6 + 1] = P(k, 4);
@@ -645,7 +658,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
     transform.setRotation( q );
     br.sendTransform( tf::StampedTransform( transform, odomAftMapped.header.stamp, "camera_init", "body" ) );
 }
-
+//每隔10个发布一下位姿
 void publish_path(const ros::Publisher pubPath)
 {
     set_posestamp(msg_body_pose);
@@ -661,25 +674,28 @@ void publish_path(const ros::Publisher pubPath)
         pubPath.publish(path);
     }
 }
-
+//残差计算函数
+//h_share_model函数主要用来计算残差，并根据IKD-Tree算出可用的点集合，并计算残差。
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
-    double match_start = omp_get_wtime();
-    laserCloudOri->clear(); 
-    corr_normvect->clear(); 
+    double match_start = omp_get_wtime();//计算匹配的开始时间
+    laserCloudOri->clear(); //将body系的有效点云存储清空
+    corr_normvect->clear(); //对应点的法向量清空？法向量为什么是一个点云类型的？PointCloudXYZI::Ptr corr_normvect(new PointCloudXYZI(100000, 1));
     total_residual = 0.0; 
 
-    /** closest surface search and residual computation **/
+    /** closest surface search and residual computation 最近面的搜索以及残差计算**/
     #ifdef MP_EN
         omp_set_num_threads(MP_PROC_NUM);
         #pragma omp parallel for
     #endif
+    //对降采样后的每个特征点进行残差计算
     for (int i = 0; i < feats_down_size; i++)
     {
-        PointType &point_body  = feats_down_body->points[i]; 
-        PointType &point_world = feats_down_world->points[i]; 
+        PointType &point_body  = feats_down_body->points[i]; ////获取降采样后的每个特征点（body坐标系，body指的是IMU）
+        PointType &point_world = feats_down_world->points[i]; //获取降采样后的每个特征点（world坐标系）
 
         /* transform to world frame */
+        //将点转换到世界坐标系下，对point_world[i]进行赋值？？那原本point_world中存储的是什么？
         V3D p_body(point_body.x, point_body.y, point_body.z);
         V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
         point_world.x = p_global(0);
@@ -798,7 +814,7 @@ int main(int argc, char** argv)
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);//VoxelGrid降采样时的体素大小
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
-    nh.param<double>("cube_side_length",cube_len,200);//地图的局部区域的长度（fast-lio2论文中有解释）
+    nh.param<double>("cube_side_length",cube_len,200);//地图的局部区域的长度（fast-lio2论文中有解释）传参传进来貌似是100
     nh.param<float>("mapping/det_range",DET_RANGE,300.f);//激光雷达最大探测范围
     nh.param<double>("mapping/fov_degree",fov_deg,180);
     nh.param<double>("mapping/gyr_cov",gyr_cov,0.1);//IMU陀螺仪协方差
@@ -859,10 +875,11 @@ int main(int argc, char** argv)
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
     /// VoxelGrid滤波器参数，即进行滤波时的创建的体素边长为filter_size_map_min 传入参数默认为0.5
     downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+    //重复操作，没有必要？
     memset(point_selected_surf, true, sizeof(point_selected_surf));
     memset(res_last, -1000.0f, sizeof(res_last));
 
-    Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
+    Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);//相对IMU的外参
     Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -870,11 +887,18 @@ int main(int argc, char** argv)
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
-    double epsi[23] = {0.001};
-    fill(epsi, epsi+23, 0.001);
+    double epsi[23] = {0.001};//定义espi数组，23个元素，并将第一个元素设置为0.001
+    fill(epsi, epsi+23, 0.001);//从espi填充到espo+22，也就是全部数组置为0.001
+    //init_dyn_share这部分传入了不同的函数用于初始化
+    //将函数地址传入kf对象中，用于接收特定于系统的模型及其差异
+    //作为一个维数变化的特征矩阵进行测量。？
+    //通过一个函数（h_dyn_share_in）同时计算测量（z）、估计测量（h）、偏微分矩阵（h_x,h_v）和噪声协方差（R）
+//其中：get_f对应fast-lio2论文公式(2)，其实这里的f就是将IMU的积分方程组成矩阵形式然后再去计算
+//df_dx, df_dw对应fast-lio2论文公式(7)
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
+    //将调试log输出到文件中
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.txt";
     fp = fopen(pos_log_dir.c_str(),"w");
@@ -889,20 +913,29 @@ int main(int argc, char** argv)
         cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
 
     /*** ROS subscribe initialization ***/
+
+    //订阅点云的topic数据，原始激光点云数据
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? \
         nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : \
         nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
+    //IMU订阅器 订阅IMU的topic
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+    //发布当前正在扫描的点云
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
+    //发布经过运动畸变矫正到IMU系的点云，点云的名字为/cloud_registered_body
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered_body", 100000);
+    //后面代码中没有用到
     ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_effected", 100000);
+    //后面代码中没有用到
     ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>
             ("/Laser_map", 100000);
+    //发布当前里程计信息
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry> 
             ("/Odometry", 100000);
+    //发布当前里程计总的路径
     ros::Publisher pubPath          = nh.advertise<nav_msgs::Path> 
             ("/path", 100000);
 //------------------------------------------------------------------------------------------------------
